@@ -5,7 +5,7 @@ from __future__ import unicode_literals
 from sslyze.plugins.plugin_base import PluginScanResult
 from sslyze.plugins.plugin_base import PluginScanCommand
 from sslyze.plugins.plugins_repository import PluginsRepository
-from sslyze.server_connectivity import ServerConnectivityInfo
+from sslyze.server_connectivity_info import ServerConnectivityInfo
 from sslyze.utils.ssl_connection import SSLConnection
 from typing import Optional
 
@@ -18,10 +18,8 @@ class SynchronousScanner(object):
     DEFAULT_NETWORK_RETRIES = 3
     DEFAULT_NETWORK_TIMEOUT = 5  # in seconds
 
-    def __init__(self,
-                 network_retries=DEFAULT_NETWORK_RETRIES,
-                 network_timeout=DEFAULT_NETWORK_TIMEOUT):
-        # type: (Optional[int], Optional[int]) -> None
+    def __init__(self, network_retries=DEFAULT_NETWORK_RETRIES, network_timeout=DEFAULT_NETWORK_TIMEOUT):
+        # type: (int, int) -> None
         """Create a scanner for running scanning commands synchronously.
 
         Args:

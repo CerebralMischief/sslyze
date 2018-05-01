@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from sslyze import PROJECT_URL, PROJECT_DESC, __author__, __email__, __version__, __license__
+from sslyze import PROJECT_URL, PROJECT_DESC, __author__, __email__, __version__
 
 
 SSLYZE_SETUP = {
@@ -8,13 +8,12 @@ SSLYZE_SETUP = {
     'description': PROJECT_DESC,
     'author': __author__,
     'author_email': __email__,
-    'license': __license__,
     'url': PROJECT_URL,
     'entry_points': {'console_scripts': ['sslyze = sslyze.__main__:main']},
     'packages': ['sslyze', 'sslyze.cli', 'sslyze.utils', 'sslyze.plugins', 'sslyze.plugins.utils',
                  'sslyze.plugins.utils.trust_store'],
-    'package_data': {'sslyze.plugins.utils.trust_store': ['pem_files/*.pem']},
-    'install_requires': ['nassl>=1.0.0,<1.1.0',
+    'package_data': {'sslyze.plugins.utils.trust_store': ['pem_files/*.pem', 'pem_files/*.yaml']},
+    'install_requires': ['nassl>=1.1.0,<1.2.0',
                          'cryptography>=2.1.4',
                          'tls-parser>=1.2.0,<1.3.0'],
     'extras_require': {':python_version < "3.4"': ['enum34'],

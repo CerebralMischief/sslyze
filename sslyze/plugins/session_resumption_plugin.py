@@ -6,43 +6,47 @@ from xml.etree.ElementTree import Element
 import nassl
 from enum import Enum
 
-from sslyze.plugins import plugin_base
-from sslyze.plugins.plugin_base import PluginScanResult
-from sslyze.server_connectivity import ServerConnectivityInfo
+from sslyze.plugins.plugin_base import PluginScanResult, PluginScanCommand, Plugin
+from sslyze.server_connectivity_info import ServerConnectivityInfo
 from sslyze.utils.thread_pool import ThreadPool
-from typing import List
+from typing import List, Type, Union
 from typing import Optional
 from typing import Text
 from typing import Tuple
 
 
-class SessionResumptionSupportScanCommand(plugin_base.PluginScanCommand):
+class SessionResumptionSupportScanCommand(PluginScanCommand):
     """Test the server(s) for session resumption support using session IDs and TLS session tickets (RFC 5077).
     """
 
     @classmethod
     def get_cli_argument(cls):
+        # type: () -> Text
         return 'resum'
 
     @classmethod
     def get_title(cls):
+        # type: () -> Text
         return 'Resumption Support'
 
 
-class SessionResumptionRateScanCommand(plugin_base.PluginScanCommand):
+class SessionResumptionRateScanCommand(PluginScanCommand):
     """Perform 100 session ID resumptions with the server(s), in order to estimate the rate for successful resumptions.
     """
 
     @classmethod
     def get_cli_argument(cls):
+        # type: () -> Text
         return 'resum_rate'
 
     @classmethod
     def get_title(cls):
+        # type: () -> Text
         return 'Resumption Rate'
 
     @classmethod
     def is_aggressive(cls):
+        # type: () -> bool
         return True
 
 
@@ -52,20 +56,24 @@ class TslSessionTicketSupportEnum(Enum):
     FAILED_TICKED_IGNORED = 3
 
 
-class SessionResumptionPlugin(plugin_base.Plugin):
+class SessionResumptionPlugin(Plugin):
     """Analyze the server(s) SSL session resumption capabilities.
     """
 
-    MAX_THREADS_NB = 20
+    MAX_THREADS_NB = 10
 
     @classmethod
     def get_available_commands(cls):
+        # type: () -> List[Type[PluginScanCommand]]
         return [SessionResumptionSupportScanCommand, SessionResumptionRateScanCommand]
 
-
-    def process_task(self, server_info, scan_command):
-        # type: (ServerConnectivityInfo, plugin_base.PluginScanCommand) -> PluginScanResult
-        if scan_command.__class__ == SessionResumptionSupportScanCommand:
+    def process_task(
+            self,
+            server_info,    # type: ServerConnectivityInfo
+            scan_command    # type: PluginScanCommand
+    ):
+        # type: (...) -> Union[SessionResumptionRateScanResult, SessionResumptionSupportScanResult]
+        if isinstance(scan_command, SessionResumptionSupportScanCommand):
             # Test Session ID support
             successful_resumptions_nb, errored_resumptions_list = self._test_session_resumption_rate(server_info, 5)
 
@@ -88,15 +96,14 @@ class SessionResumptionPlugin(plugin_base.Plugin):
                                                         errored_resumptions_list, ticket_supported, ticket_reason,
                                                         ticket_exception)
 
-        elif scan_command.__class__ == SessionResumptionRateScanCommand:
+        elif isinstance(scan_command, SessionResumptionRateScanCommand):
             successful_resumptions_nb, errored_resumptions_list = self._test_session_resumption_rate(server_info, 100)
-            result = SessionResumptionRateScanResult(server_info, scan_command, 100, successful_resumptions_nb,
-                                                     errored_resumptions_list)
+            result = SessionResumptionRateScanResult(server_info, scan_command, 100,  # type: ignore
+                                                     successful_resumptions_nb, errored_resumptions_list)
         else:
             raise ValueError('PluginSessionResumption: Unknown command.')
 
         return result
-
 
     def _test_session_resumption_rate(self, server_info, resumption_attempts_nb):
         # type: (ServerConnectivityInfo, int) -> Tuple[int, List[Text]]
@@ -105,7 +112,7 @@ class SessionResumptionPlugin(plugin_base.Plugin):
         thread_pool = ThreadPool()
 
         for _ in range(resumption_attempts_nb):
-            thread_pool.add_job((self._resume_with_session_id, (server_info, )))
+            thread_pool.add_job((self._resume_with_session_id, [server_info]))
         thread_pool.start(nb_threads=min(resumption_attempts_nb, self.MAX_THREADS_NB))
 
         # Count successful/failed resumptions
@@ -124,7 +131,6 @@ class SessionResumptionPlugin(plugin_base.Plugin):
 
         thread_pool.join()
         return successful_resumptions_nb, errored_resumptions_list
-
 
     def _resume_with_session_id(self, server_info):
         # type: (ServerConnectivityInfo) -> bool
@@ -184,7 +190,6 @@ class SessionResumptionPlugin(plugin_base.Plugin):
 
         return TslSessionTicketSupportEnum.SUCCEEDED
 
-
     @staticmethod
     def _extract_session_id(ssl_session):
         # type: (nassl._nassl.SSL_SESSION) -> Text
@@ -194,7 +199,6 @@ class SessionResumptionPlugin(plugin_base.Plugin):
         session_id = (session_string.split('Session-ID-ctx:'))[0].strip()
         return session_id
 
-
     @staticmethod
     def _extract_tls_session_ticket(ssl_session):
         # type: (nassl._nassl.SSL_SESSION) -> Text
@@ -203,7 +207,6 @@ class SessionResumptionPlugin(plugin_base.Plugin):
         session_string = ((ssl_session.as_text()).split('TLS session ticket:'))[1]
         session_tls_ticket = (session_string.split('Compression:'))[0]
         return session_tls_ticket
-
 
     @staticmethod
     def _resume_ssl_session(server_info, ssl_session=None, should_enable_tls_ticket=False):
@@ -250,18 +253,19 @@ class SessionResumptionRateScanResult(PluginScanResult):
             successful_resum_nb,        # type: int
             errored_resumptions_list    # type: List[Text]
     ):
+        # type: (...) -> None
         super(SessionResumptionRateScanResult, self).__init__(server_info, scan_command)
         self.attempted_resumptions_nb = attempted_resum_nb
         self.successful_resumptions_nb = successful_resum_nb
         self.errored_resumptions_list = errored_resumptions_list
         self.failed_resumptions_nb = attempted_resum_nb - successful_resum_nb - len(errored_resumptions_list)
 
-
     RESUMPTION_RESULT_FORMAT = '{4} ({0} successful, {1} failed, {2} errors, {3} total attempts).'
     RESUMPTION_LINE_FORMAT = '      {resumption_type:<35}{result}'
     RESUMPTION_ERROR_FORMAT = '        ERROR #{error_nb}: {error_msg}'
 
     def as_text(self):
+        # type: () -> List[Text]
         result_txt = [self._format_title(self.scan_command.get_title())]
 
         # Create the line which summarizes the session resumption rate
@@ -290,18 +294,19 @@ class SessionResumptionRateScanResult(PluginScanResult):
 
         return result_txt
 
-
     def as_xml(self):
+        # type: () -> Element
         xml_result = Element(self.scan_command.get_cli_argument(), title=self.scan_command.get_title())
 
         resumption_rate_xml = Element(
-                'sessionResumptionWithSessionIDs',
-                attrib={'totalAttempts': str(self.attempted_resumptions_nb),
-                        'errors': str(len(self.errored_resumptions_list)),
-                        'isSupported': str(self.attempted_resumptions_nb == self.successful_resumptions_nb),
-                        'successfulAttempts': str(self.successful_resumptions_nb),
-                        'failedAttempts': str(self.failed_resumptions_nb)}
-        )
+            'sessionResumptionWithSessionIDs',
+            attrib={
+                'totalAttempts': str(self.attempted_resumptions_nb),
+                'errors': str(len(self.errored_resumptions_list)),
+                'isSupported': str(self.attempted_resumptions_nb == self.successful_resumptions_nb),
+                'successfulAttempts': str(self.successful_resumptions_nb),
+                'failedAttempts': str(self.failed_resumptions_nb)
+            })
         # Add error messages if there was any
         for error_msg in self.errored_resumptions_list:
             resumption_error_xml = Element('error')
@@ -310,7 +315,6 @@ class SessionResumptionRateScanResult(PluginScanResult):
 
         xml_result.append(resumption_rate_xml)
         return xml_result
-
 
 
 class SessionResumptionSupportScanResult(PluginScanResult):
@@ -331,7 +335,7 @@ class SessionResumptionSupportScanResult(PluginScanResult):
     def __init__(
             self,
             server_info,                            # type: ServerConnectivityInfo
-            scan_command,                           # type: SessionResumptionRateScanCommand
+            scan_command,                           # type: SessionResumptionSupportScanCommand
             attempted_resum_nb,                     # type: int
             successful_resum_nb,                    # type: int
             errored_resumptions_list,               # type: List[Text]
@@ -339,6 +343,7 @@ class SessionResumptionSupportScanResult(PluginScanResult):
             ticket_resumption_failed_reason=None,   # type: Optional[Text]
             ticket_resumption_exception=None        # type: Optional[Exception]
     ):
+        # type: (...) -> None
         super(SessionResumptionSupportScanResult, self).__init__(server_info, scan_command)
         self.attempted_resumptions_nb = attempted_resum_nb
         self.successful_resumptions_nb = successful_resum_nb
@@ -351,16 +356,18 @@ class SessionResumptionSupportScanResult(PluginScanResult):
         # An exception was raised while trying to perform ticket resumption (should never happen)
         self.ticket_resumption_error = None
         if ticket_resumption_exception:
-            self.ticket_resumption_error = '{} - {}'.format(str(ticket_resumption_exception.__class__.__name__),
-                                                             str(ticket_resumption_exception))
-
+            self.ticket_resumption_error = '{} - {}'.format(
+                str(ticket_resumption_exception.__class__.__name__), str(ticket_resumption_exception)
+            )
         # We use a SessionResumptionRateScanResult to re-use code in as_text() and as_xml()
-        self._rate_result = SessionResumptionRateScanResult(server_info, scan_command, attempted_resum_nb,
-                                                            successful_resum_nb, errored_resumptions_list)
+        self._rate_result = SessionResumptionRateScanResult(server_info, scan_command,  # type: ignore
+                                                            attempted_resum_nb, successful_resum_nb,
+                                                            errored_resumptions_list)
 
     RESUMPTION_LINE_FORMAT = '      {resumption_type:<35}{result}'
 
     def as_text(self):
+        # type: () -> List[Text]
         # Same output as --resum_rate but add a line about TLS ticket resumption at the end
         result_txt = self._rate_result.as_text()
 
@@ -371,12 +378,11 @@ class SessionResumptionSupportScanResult(PluginScanResult):
                 if self.is_ticket_resumption_supported \
                 else 'NOT SUPPORTED - {}.'.format(self.ticket_resumption_failed_reason)
 
-
         result_txt.append(self.RESUMPTION_LINE_FORMAT.format(resumption_type='With TLS Tickets:', result=ticket_txt))
         return result_txt
 
-
     def as_xml(self):
+        # type: () -> Element
         xml_result = Element(self.scan_command.get_cli_argument(), title=self.scan_command.get_title())
 
         # We keep the session resumption XML node
@@ -390,7 +396,7 @@ class SessionResumptionSupportScanResult(PluginScanResult):
             xml_resum_ticket_attr['error'] = self.ticket_resumption_error
         else:
             xml_resum_ticket_attr['isSupported'] = str(self.is_ticket_resumption_supported)
-            if not self.is_ticket_resumption_supported:
+            if not self.is_ticket_resumption_supported and self.ticket_resumption_failed_reason is not None:
                 xml_resum_ticket_attr['reason'] = self.ticket_resumption_failed_reason
 
         xml_resum_ticket = Element('sessionResumptionWithTLSTickets', attrib=xml_resum_ticket_attr)

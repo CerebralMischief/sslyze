@@ -4,6 +4,8 @@ from __future__ import unicode_literals
 
 import optparse
 import os
+from datetime import datetime
+from enum import Enum
 from ssl import CertificateError
 from xml.etree.ElementTree import Element
 
@@ -11,12 +13,12 @@ import binascii
 
 import pickle
 
-import cryptography
-
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
+from cryptography.x509 import Certificate, load_pem_x509_certificate
 from nassl.ocsp_response import OcspResponse, OcspResponseStatusEnum
 from nassl.ocsp_response import OcspResponseNotTrustedError
 from nassl.ssl_client import ClientCertificateRequested
@@ -27,9 +29,9 @@ from sslyze.plugins.utils.trust_store.trust_store import TrustStore
 from sslyze.plugins.utils.trust_store.trust_store import InvalidCertificateChainOrderError
 from sslyze.plugins.utils.trust_store.trust_store import AnchorCertificateNotInTrustStoreError
 from sslyze.plugins.utils.trust_store.trust_store_repository import TrustStoresRepository
-from sslyze.server_connectivity import ServerConnectivityInfo
+from sslyze.server_connectivity_info import ServerConnectivityInfo
 from sslyze.utils.thread_pool import ThreadPool
-from typing import List
+from typing import List, Dict, Any, Type
 from typing import Optional
 from typing import Text
 from typing import Tuple
@@ -41,7 +43,7 @@ class CertificateInfoScanCommand(PluginScanCommand):
     """
 
     def __init__(self, ca_file=None):
-        # type: (Optional[Text], Optional[bool]) -> None
+        # type: (Optional[Text]) -> None
         """
 
         Args:
@@ -53,10 +55,12 @@ class CertificateInfoScanCommand(PluginScanCommand):
 
     @classmethod
     def get_title(cls):
+        # type: () -> Text
         return 'Certificate Information'
 
     @classmethod
     def get_cli_argument(cls):
+        # type: () -> Text
         return 'certinfo'
 
 
@@ -96,10 +100,12 @@ class CertificateInfoPlugin(plugin_base.Plugin):
 
     @classmethod
     def get_available_commands(cls):
+        # type: () -> List[Type[PluginScanCommand]]
         return [CertificateInfoScanCommand]
 
     @classmethod
     def get_cli_option_group(cls):
+        # type: () -> List[optparse.Option]
         options = super(CertificateInfoPlugin, cls).get_cli_option_group()
 
         # Add the special optional argument for this plugin's commands
@@ -114,10 +120,12 @@ class CertificateInfoPlugin(plugin_base.Plugin):
         )
         return options
 
-
     def process_task(self, server_info, scan_command):
-        # type: (ServerConnectivityInfo, CertificateInfoScanCommand) -> CertificateInfoScanResult
-        final_trust_store_list = list(TrustStoresRepository.get_all())
+        # type: (ServerConnectivityInfo, PluginScanCommand) -> CertificateInfoScanResult
+        if not isinstance(scan_command, CertificateInfoScanCommand):
+            raise ValueError('Unexpected scan command')
+
+        final_trust_store_list = TrustStoresRepository.get_default().get_all_stores()
         if scan_command.custom_ca_file:
             if not os.path.isfile(scan_command.custom_ca_file):
                 raise ValueError('Could not open supplied CA file at "{}"'.format(scan_command.custom_ca_file))
@@ -129,13 +137,13 @@ class CertificateInfoPlugin(plugin_base.Plugin):
         thread_pool = ThreadPool()
         for trust_store in final_trust_store_list:
             # Try to connect with each trust store
-            thread_pool.add_job((self._get_and_verify_certificate_chain, (server_info, trust_store)))
+            thread_pool.add_job((self._get_and_verify_certificate_chain, [server_info, trust_store]))
 
         # Start processing the jobs; one thread per trust
         thread_pool.start(len(final_trust_store_list))
 
         # Store the results as they come
-        certificate_chain = []
+        certificate_chain = []  # type: List[Certificate]
         path_validation_result_list = []
         path_validation_error_list = []
         ocsp_response = None
@@ -157,16 +165,15 @@ class CertificateInfoPlugin(plugin_base.Plugin):
 
         if len(path_validation_error_list) == len(final_trust_store_list):
             # All connections failed unexpectedly; raise an exception instead of returning a result
-            raise last_exception
+            raise last_exception  # type: ignore
 
         # All done
         return CertificateInfoScanResult(server_info, scan_command, certificate_chain, path_validation_result_list,
                                          path_validation_error_list, ocsp_response)
 
-
     @staticmethod
     def _get_and_verify_certificate_chain(server_info, trust_store):
-        # type: (ServerConnectivityInfo, TrustStore) -> Tuple[List[cryptography.x509.Certificate], Text, Optional[OcspResponse]]
+        # type: (ServerConnectivityInfo, TrustStore) -> Tuple[List[Certificate], Text, Optional[OcspResponse]]
         """Connects to the target server and uses the supplied trust store to validate the server's certificate.
         Returns the server's certificate and OCSP response.
         """
@@ -192,8 +199,7 @@ class CertificateInfoPlugin(plugin_base.Plugin):
             ssl_connection.close()
 
         # Parse the certificates using the cryptography module
-        parsed_x509_chain = [cryptography.x509.load_pem_x509_certificate(x509_cert.as_pem().encode('ascii'),
-                                                                         backend=default_backend())
+        parsed_x509_chain = [load_pem_x509_certificate(x509_cert.as_pem().encode('ascii'), backend=default_backend())
                              for x509_cert in x509_cert_chain]
         return parsed_x509_chain, verify_str, ocsp_response
 
@@ -203,9 +209,9 @@ class CertificateInfoScanResult(PluginScanResult):
     """The result of running a CertificateInfoScanCommand on a specific server.
 
     Attributes:
-        certificate_chain (List[cryptography.x509.Certificate]): The certificate chain sent by the server; index 0 is 
-            the leaf certificate. Each certificate is parsed using the cryptography module; documentation is available 
-            at https://cryptography.io/en/latest/x509/reference/#x-509-certificate-object. 
+        certificate_chain (List[cryptography.x509.Certificate]): The certificate chain sent by the server; index 0 is
+            the leaf certificate. Each certificate is parsed using the cryptography module; documentation is available
+            at https://cryptography.io/en/latest/x509/reference/#x-509-certificate-object.
         path_validation_result_list (List[PathValidationResult]): The list of attempts at validating the server's
             certificate chain path using the trust stores packaged with SSLyze (Mozilla, Apple, etc.).
         path_validation_error_list (List[PathValidationError]):  The list of attempts at validating the server's
@@ -219,8 +225,8 @@ class CertificateInfoScanResult(PluginScanResult):
         verified_certificate_chain (List[cryptography.x509.Certificate]): The verified certificate chain built using the
             successful_trust_store; index 0 is the leaf certificate and the last element is the anchor/CA certificate
             from the trust store. Will be empty if the validation failed with all available trust store, or the
-            verified chain could not be built. Each certificate is parsed using the cryptography module; documentation 
-            is available at https://cryptography.io/en/latest/x509/reference/#x-509-certificate-object. 
+            verified chain could not be built. Each certificate is parsed using the cryptography module; documentation
+            is available at https://cryptography.io/en/latest/x509/reference/#x-509-certificate-object.
         certificate_matches_hostname (bool): True if hostname validation was successful ie. the leaf certificate was
             issued for the server's hostname.
         is_leaf_certificate_ev (bool): True if the leaf certificate is Extended Validation according to Mozilla.
@@ -238,17 +244,21 @@ class CertificateInfoScanResult(PluginScanResult):
             SHA-1 algorithm. None if the verified chain could not be built or no HPKP header was returned.
         has_anchor_in_certificate_chain (bool): True if the server included the anchor/root certificate in the chain it
             send back to clients. None if the verified chain could not be built or no HPKP header was returned.
+        symantec_distrust_timeline (Optional[SymantecDistrustTimelineEnum]): When the certificate will be distrusted
+            in Chrome and Firefox
+            (https://blog.qualys.com/ssllabs/2017/09/26/google-and-mozilla-deprecating-existing-symantec-certificates).
+            None if the certificate chain was not issued by one of the Symantec CAs.
     """
 
     def __init__(
             self,
             server_info,                    # type: ServerConnectivityInfo
             scan_command,                   # type: CertificateInfoScanCommand
-            certificate_chain,              # type: List[cryptography.x509.Certificate]
+            certificate_chain,              # type: List[Certificate]
             path_validation_result_list,    # type: List[PathValidationResult]
             path_validation_error_list,     # type: List[PathValidationError]
             ocsp_response                   # type: OcspResponse
-            ):
+    ):
         # type: (...) -> None
         super(CertificateInfoScanResult, self).__init__(server_info, scan_command)
         # Find the first trust store that successfully validated the certificate chain
@@ -282,7 +292,9 @@ class CertificateInfoScanResult(PluginScanResult):
         self.certificate_chain = certificate_chain
 
         # Check if it is EV - we only have the EV OIDs for Mozilla
-        self.is_leaf_certificate_ev = TrustStoresRepository.get_main().is_extended_validation(self.certificate_chain[0])
+        self.is_leaf_certificate_ev = TrustStoresRepository.get_default().get_main_store().is_extended_validation(
+            self.certificate_chain[0]
+        )
 
         # Look for the Must-Staple extension
         has_must_staple = CertificateUtils.has_ocsp_must_staple_extension(self.certificate_chain[0])
@@ -292,7 +304,7 @@ class CertificateInfoScanResult(PluginScanResult):
         self.certificate_included_scts_count = CertificateUtils.count_scts_in_sct_extension(self.certificate_chain[0])
 
         # Try to build the verified chain
-        self.verified_certificate_chain = []
+        self.verified_certificate_chain = []  # type: List[Certificate]
         self.is_certificate_chain_order_valid = True
         if self.successful_trust_store:
             try:
@@ -326,7 +338,11 @@ class CertificateInfoScanResult(PluginScanResult):
                     self.has_sha1_in_certificate_chain = True
                     break
 
+        # Check if this is a distrusted Symantec-issued chain
+        self.symantec_distrust_timeline = _SymantecDistructTester.get_distrust_timeline(self.verified_certificate_chain)
+
     def __getstate__(self):
+        # type: () -> Dict[Text, Any]
         # This object needs to be pick-able as it gets sent through multiprocessing.Queues
         pickable_dict = self.__dict__.copy()
         # Manually handle non-pickable entries
@@ -341,16 +357,17 @@ class CertificateInfoScanResult(PluginScanResult):
         return pickable_dict
 
     def __setstate__(self, state):
+        # type: (Dict[Text, Any]) -> None
         self.__dict__.update(state)
         # Manually restore non-pickable entries
         self.__dict__['successful_trust_store'] = pickle.loads(self.__dict__['successful_trust_store'])
         self.__dict__['path_validation_result_list'] = pickle.loads(self.__dict__['path_validation_result_list'])
 
-        certificate_chain = [cryptography.x509.load_pem_x509_certificate(cert_pem, default_backend())
+        certificate_chain = [load_pem_x509_certificate(cert_pem, default_backend())
                              for cert_pem in self.__dict__['certificate_chain']]
         self.__dict__['certificate_chain'] = certificate_chain
 
-        verified_chain = [cryptography.x509.load_pem_x509_certificate(cert_pem, default_backend())
+        verified_chain = [load_pem_x509_certificate(cert_pem, default_backend())
                           for cert_pem in self.__dict__['verified_certificate_chain']]
         self.__dict__['verified_certificate_chain'] = verified_chain
 
@@ -358,8 +375,8 @@ class CertificateInfoScanResult(PluginScanResult):
     NO_VERIFIED_CHAIN_ERROR_TXT = 'ERROR - Could not build verified chain (certificate untrusted?)'
 
     def as_text(self):
-        text_output = [self._format_title(self.scan_command.get_title())]
-        text_output.append(self._format_subtitle('Content'))
+        # type: () -> List[Text]
+        text_output = [self._format_title(self.scan_command.get_title()), self._format_subtitle('Content')]
         text_output.extend(self._get_basic_certificate_text())
 
         # Trust section
@@ -380,7 +397,7 @@ class CertificateInfoScanResult(PluginScanResult):
             if path_result.is_certificate_trusted:
                 # EV certs - Only Mozilla supported for now
                 ev_txt = ''
-                if self.is_leaf_certificate_ev and TrustStoresRepository.get_main() == path_result.trust_store:
+                if self.is_leaf_certificate_ev and path_result.trust_store.ev_oids:
                     ev_txt = ', Extended Validation'
                 path_txt = 'OK - Certificate is trusted{}'.format(ev_txt)
 
@@ -399,6 +416,14 @@ class CertificateInfoScanResult(PluginScanResult):
                 self.TRUST_FORMAT.format(store_name=path_result.trust_store.name,
                                          store_version=path_result.trust_store.version),
                 error_txt))
+
+        if self.symantec_distrust_timeline is not None:
+            timeline_str = 'March 2018' if self.symantec_distrust_timeline == SymantecDistrustTimelineEnum.MARCH_2018 \
+                else 'September 2018'
+            symantec_str = 'WARNING: Certificate distrusted by Google and Mozilla on {}'.format(timeline_str)
+        else:
+            symantec_str = 'OK - Not a Symantec-issued certificate'
+        text_output.append(self._format_field('Symantec 2018 Deprecation:', symantec_str))
 
         # Print the Common Names within the certificate chain
         cns_in_certificate_chain = [CertificateUtils.get_name_as_short_text(cert.subject)
@@ -461,7 +486,7 @@ class CertificateInfoScanResult(PluginScanResult):
         else:
             if self.ocsp_response_status != OcspResponseStatusEnum.SUCCESSFUL:
                 ocsp_resp_txt = [self._format_field('', 'ERROR - OCSP response status is not successful: {}'.format(
-                    self.ocsp_response_status.name
+                    self.ocsp_response_status.name  # type: ignore
                 ))]
             else:
                 ocsp_trust_txt = 'OK - Response is trusted' \
@@ -488,7 +513,7 @@ class CertificateInfoScanResult(PluginScanResult):
 
     @staticmethod
     def _certificate_chain_to_xml(certificate_chain):
-        # type: (List[cryptography.x509.Certificate]) -> List[Element]
+        # type: (List[Certificate]) -> List[Element]
         cert_xml_list = []
         for certificate in certificate_chain:
             cert_xml = Element('certificate', attrib={
@@ -530,7 +555,7 @@ class CertificateInfoScanResult(PluginScanResult):
             public_key = certificate.public_key()
             if isinstance(public_key, EllipticCurvePublicKey):
                 key_attrs['size'] = str(public_key.curve.key_size)
-                key_attrs['curve'] =  public_key.curve.name
+                key_attrs['curve'] = public_key.curve.name
             else:
                 key_attrs['size'] = str(public_key.key_size)
                 key_attrs['exponent'] = str(public_key.public_numbers().e)
@@ -551,6 +576,7 @@ class CertificateInfoScanResult(PluginScanResult):
         return cert_xml_list
 
     def as_xml(self):
+        # type: () -> Element
         xml_output = Element(self.scan_command.get_cli_argument(), title=self.scan_command.get_title())
 
         # Certificate chain
@@ -583,7 +609,7 @@ class CertificateInfoScanResult(PluginScanResult):
             }
 
             # Things we only do with the Mozilla store: EV certs
-            if self.is_leaf_certificate_ev and TrustStoresRepository.get_main() == path_result.trust_store:
+            if self.is_leaf_certificate_ev and path_result.trust_store.ev_oids:
                 path_attrib_xml['isExtendedValidationCertificate'] = str(self.is_leaf_certificate_ev)
 
             path_valid_xml = Element('pathValidation', attrib=path_attrib_xml)
@@ -606,9 +632,10 @@ class CertificateInfoScanResult(PluginScanResult):
                 {
                     'hasSha1SignedCertificate': str(self.has_sha1_in_certificate_chain),
                     'suppliedServerNameIndication': self.server_info.tls_server_name_indication,
-                    'successfulTrustStore': self.successful_trust_store.name,
+                    'successfulTrustStore': self.successful_trust_store.name,  # type: ignore
                     'hasMustStapleExtension': str(self.certificate_has_must_staple_extension),
                     'includedSctsCount': str(self.certificate_included_scts_count),
+                    'isAffectedBySymantecDeprecation': str(True if self.symantec_distrust_timeline else False)
                 }
             )
             for cert_xml in self._certificate_chain_to_xml(self.verified_certificate_chain):
@@ -617,18 +644,21 @@ class CertificateInfoScanResult(PluginScanResult):
 
         xml_output.append(trust_validation_xml)
 
-
         # OCSP Stapling
         ocsp_xml = Element('ocspStapling', attrib={'isSupported': 'False' if self.ocsp_response is None else 'True'})
 
-        if self.ocsp_response:
+        if self.ocsp_response is not None:
             if self.ocsp_response_status != OcspResponseStatusEnum.SUCCESSFUL:
                 ocsp_resp_xmp = Element('ocspResponse',
-                                        attrib={'status': self.ocsp_response_status.name})
+                                        attrib={
+                                            'status': self.ocsp_response_status.name  # type: ignore
+                                        })
             else:
                 ocsp_resp_xmp = Element('ocspResponse',
-                                        attrib={'isTrustedByMozillaCAStore': str(self.is_ocsp_response_trusted),
-                                                'status': self.ocsp_response_status.name})
+                                        attrib={
+                                            'isTrustedByMozillaCAStore': str(self.is_ocsp_response_trusted),
+                                            'status': self.ocsp_response_status.name  # type: ignore
+                                        })
 
                 responder_xml = Element('responderID')
                 responder_xml.text = self.ocsp_response['responderID']
@@ -645,6 +675,7 @@ class CertificateInfoScanResult(PluginScanResult):
         return xml_output
 
     def _get_basic_certificate_text(self):
+        # type: () -> List[Text]
         certificate = self.certificate_chain[0]
         public_key = self.certificate_chain[0].public_key()
         text_output = [
@@ -673,3 +704,118 @@ class CertificateInfoScanResult(PluginScanResult):
             pass
 
         return text_output
+
+
+class SymantecDistrustTimelineEnum(Enum):
+    MARCH_2018 = 1
+    SEPTEMBER_2018 = 2
+
+
+class _SymantecDistructTester(object):
+    """Logic to detect Synmantec certificates, to be distrusted by Google and Mozilla.
+
+    https://security.googleblog.com/2017/09/chromes-plan-to-distrust-symantec.html
+    """
+
+    # Taken from https://cs.chromium.org/chromium/src/net/cert/symantec_certs.cc
+    _CA_KEYS_BLACKLIST = [
+        # kSymantecRoots
+        '023c81cce8e7c64fa942d3c15048707d35d9bb5b87f4f544c5bf1bc5643af2fa',
+        '0999bf900bd5c297865e21e1aade6cf6bb3a94d11ae5ea798442a4e2f813241f',
+        '0bdd5abe940caaabe8b2bba88348fb6f4aa4cc84436f880bece66b48bda913d8',
+        '16a9e012d32329f282b10bbf57c7c0b42ae80f6ac9542eb409bc1c2cde50d322',
+        '17755a5c295f3d2d72e6f031a1f07f400c588b9e582b22f17eae31a1590d1185',
+        '1906c6124dbb438578d00e066d5054c6c37f0fa6028c05545e0994eddaec8629',
+        '1916f3508ec3fad795f8dc4bd316f9c6085a64de3c4153ac6d62d5ea19515d39',
+        '1d75d0831b9e0885394d32c7a1bfdb3dbc1c28e2b0e8391fb135981dbc5ba936',
+        '22076e5aef44bb9a416a28b7d1c44322d7059f60feffa5caf6c5be8447891303',
+        '25b41b506e4930952823a6eb9f1d31def645ea38a5c6c6a96d71957e384df058',
+        '26c18dc6eea6f632f676bceba1d8c2b48352f29c2d5fcda878e09dcb832dd6e5',
+        '2dc9470be63ef4acf1bd828609402bb7b87bd99638a643934e88682d1be8c308',
+        '2dee5171596ab8f3cd3c7635fea8e6c3006aa9e31db39d03a7480ddb2428a33e',
+        '3027a298fa57314dc0e3dd1019411b8f404c43c3f934ce3bdf856512c80aa15c',
+        '31512680233f5f2a1f29437f56d4988cf0afc41cc6c5da6275928e9c0beade27',
+        '43b3107d7342165d406cf975cd79b36ed1645048f05d7ff6ea0096e427b7db84',
+        '463dbb9b0a26ed2616397b643125fbd29b66cf3a46fdb4384b209e78237a1aff',
+        '479d130bf3fc61dc2f1d508d239a13276ae7b3c9841011a02c1402c7e677bd5f',
+        '4905466623ab4178be92ac5cbd6584f7a1e17f27652d5a85af89504ea239aaaa',
+        '495a96ba6bad782407bd521a00bace657bb355555e4bb7f8146c71bba57e7ace',
+        '4ba6031ca305b09e53bde3705145481d0332b651fe30370dd5254cc4d2cb32f3',
+        '5192438ec369d7ee0ce71f5c6db75f941efbf72e58441715e99eab04c2c8acee',
+        '567b8211fd20d3d283ee0cd7ce0672cb9d99bc5b487a58c9d54ec67f77d4a8f5',
+        '5c4f285388f38336269a55c7c12c0b3ca73fef2a5a4df82b89141e841a6c4de4',
+        '67dc4f32fa10e7d01a79a073aa0c9e0212ec2ffc3d779e0aa7f9c0f0e1c2c893',
+        '6b86de96a658a56820a4f35d90db6c3efdd574ce94b909cb0d7ff17c3c189d83',
+        '7006a38311e58fb193484233218210c66125a0e4a826aed539ac561dfbfbd903',
+        '781f1c3a6a42e3e915222db4967702a2e577aeb017075fa3c159851fddd0535e',
+        '7caa03465124590c601e567e52148e952c0cffe89000530fe0d95b6d50eaae41',
+        '809f2baae35afb4f36bd6476ce75c2001077901b6af5c4dab82e188c6b95c1a1',
+        '81a98fc788c35f557645a95224e50cd1dac8ffb209dc1e5688aa29205f132218',
+        '860a7f19210d5ead057a78532b80951453cb2907315f3ba7aa47b69897d70f3f',
+        '87af34d66fb3f2fdf36e09111e9aba2f6f44b207f3863f3d0b54b25023909aa5',
+        '95735473bd67a3b95a8d5f90c5a21ace1e0d7947320674d4ab847972b91544d2',
+        '967b0cd93fcef7f27ce2c245767ae9b05a776b0649f9965b6290968469686872',
+        '9699225c5de52e]]56cdd32df2e96d1cfea5aa3ca0bb52cd8933c23b5c27443820',
+        '9c6f6a123cbaa4ee34dbeceee24c97d738878cb423f3c2273903424f5d1f6dd5',
+        'a6f1f9bf8a0a9ddc080fb49b1efc3d1a1c2c32dc0e136a5b00c97316f2a3dc11',
+        'ab3876c3da5de0c9cf6736868ee5b88bf9ba1dff9c9d72d2fe5a8d2f78302166',
+        'ab39a4b025955691a40269f353fa1d5cb94eaf6c7ea9808484bbbb62fd9f68f3',
+        'ab5cdb3356397356d6e691973c25b8618b65d76a90486ea7a8a5c17767f4673a',
+        'ab98495276adf1ecaff28f35c53048781e5c1718dab9c8e67a504f4f6a51328f',
+        'acf65e1d62cb58a2bafd6ffab40fb88699c47397cf5cb483d42d69cad34cd48b',
+        'af207c61fd9c7cf92c2afe8154282dc3f2cbf32f75cd172814c52b03b7ebc258',
+        'b1124142a5a1a5a28819c735340eff8c9e2f8168fee3ba187f253bc1a392d7e2',
+        'b2def5362ad3facd04bd29047a43844f767034ea4892f80e56bee690243e2502',
+        'bcfb44aab9ad021015706b4121ea761c81c9e88967590f6f94ae744dc88b78fb',
+        'c07135f6b452398264a4776dbd0a6a307c60a36f967bd26321dcb817b5c0c481',
+        'cab482cd3e820c5ce72aa3b6fdbe988bb8a4f0407ecafd8c926e36824eab92dd',
+        'd2f91a04e3a61d4ead7848c8d43b5e1152d885727489bc65738b67c0a22785a7',
+        'd3a25da80db7bab129a066ab41503dddffa02c768c0589f99fd71193e69916b6',
+        'd4af6c0a482310bd7c54bb7ab121916f86c0c07cd52fcac32d3844c26005115f',
+        'da800b80b2a87d399e66fa19d72fdf49983b47d8cf322c7c79503a0c7e28feaf',
+        'f15f1d323ed9ca98e9ea95b33ec5dda47ea4c329f952c16f65ad419e64520476',
+        'f2e9365ea121df5eebd8de2468fdc171dc0a9e46dadc1ab41d52790ba980a7c2',
+        'f53c22059817dd96f400651639d2f857e21070a59abed9079400d9f695506900',
+        'f6b59c8e2789a1fd5d5b253742feadc6925cb93edc345e53166e12c52ba2a601',
+        'ff5680cd73a5703da04817a075fd462506a73506c4b81a1583ef549478d26476',
+    ]
+
+    _CA_KEYS_WHITELIST = [
+        # kSymantecExceptions
+        '56e98deac006a729afa2ed79f9e419df69f451242596d2aaf284c74a855e352e',
+        '7289c06dedd16b71a7dcca66578572e2e109b11d70ad04c2601b6743bc66d07b',
+        '8bb593a93be1d0e8a822bb887c547890c3e706aad2dab76254f97fb36b82fc26',
+        'b5cf82d47ef9823f9aa78f123186c52e8879ea84b0f822c91d83e04279b78fd5',
+        'b94c198300cec5c057ad0727b70bbe91816992256439a7b32f4598119dda9c97',
+        'c0554bde87a075ec13a61f275983ae023957294b454caf0a9724e3b21b7935bc',
+        'e24f8e8c2185da2f5e88d4579e817c47bf6eafbc8505f0f960fd5a0df4473ad3',
+        'ec722969cb64200ab6638f68ac538e40abab5b19a6485661042a1061c4612776',
+        'fae46000d8f7042558541e98acf351279589f83b6d3001c18442e4403d111849',
+
+        # kSymantecManagedCAs
+        '7cac9a0ff315387750ba8bafdb1c2bc29b3f0bba16362ca93a90f84da2df5f3e',
+        'ac50b5fb738aed6cb781cc35fbfff7786f77109ada7c08867c04a573fd5cf9ee',
+    ]
+
+    @classmethod
+    def get_distrust_timeline(cls, verified_certificate_chain):
+        # type: (List[Certificate]) -> Optional[SymantecDistrustTimelineEnum]
+        has_whitelisted_cert = False
+        has_blacklisted_cert = False
+
+        # Is there a Symantec root certificate in the chain?
+        for certificate in verified_certificate_chain:
+            key_hash = binascii.hexlify(CertificateUtils.get_public_key_sha256(certificate)).decode('ascii')
+            if key_hash in cls._CA_KEYS_BLACKLIST:
+                has_blacklisted_cert = True
+            if key_hash in cls._CA_KEYS_WHITELIST:
+                has_whitelisted_cert = True
+
+        distrust_enum = None
+        if has_blacklisted_cert and not has_whitelisted_cert:
+            leaf_cert = verified_certificate_chain[0]
+            if leaf_cert.not_valid_before < datetime(year=2016, month=6, day=1):
+                distrust_enum = SymantecDistrustTimelineEnum.MARCH_2018
+            else:
+                distrust_enum = SymantecDistrustTimelineEnum.SEPTEMBER_2018
+        return distrust_enum

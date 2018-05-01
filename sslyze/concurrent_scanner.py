@@ -4,14 +4,14 @@ from __future__ import unicode_literals
 
 import random
 from _elementtree import Element
-from multiprocessing import JoinableQueue
+from multiprocessing import JoinableQueue  # type: ignore
 
 from sslyze.plugins.plugin_base import PluginScanResult
 from sslyze.plugins.plugin_base import PluginScanCommand
-from sslyze.server_connectivity import ServerConnectivityInfo
+from sslyze.server_connectivity_info import ServerConnectivityInfo
 from sslyze.synchronous_scanner import SynchronousScanner
 from sslyze.utils.worker_process import WorkerProcess
-from typing import Iterable
+from typing import Iterable, Dict
 from typing import List
 from typing import Optional
 from typing import Text
@@ -40,7 +40,9 @@ class PluginRaisedExceptionScanResult(PluginScanResult):
 
     def as_xml(self):
         # type: () -> Element
-        return Element(self.scan_command.get_cli_argument(), title=self.scan_command.get_title(), exception=self.as_text()[1])
+        return Element(
+            self.scan_command.get_cli_argument(), title=self.scan_command.get_title(), exception=self.as_text()[1]
+        )
 
 
 class ConcurrentScanner(object):
@@ -55,7 +57,7 @@ class ConcurrentScanner(object):
                  network_timeout=SynchronousScanner.DEFAULT_NETWORK_TIMEOUT,
                  max_processes_nb=_DEFAULT_MAX_PROCESSES_NB,
                  max_processes_per_hostname_nb=_DEFAULT_PROCESSES_PER_HOSTNAME_NB):
-        # type: (Optional[int], Optional[int], Optional[int], Optional[int]) -> None
+        # type: (int, int, int, int) -> None
         """Create a scanner for running scanning commands concurrently using a pool of processes.
 
         Args:
@@ -72,13 +74,12 @@ class ConcurrentScanner(object):
 
         # Create hostname-specific queues to ensure aggressive scan commands targeting this hostname are never
         # run concurrently
-        self._hostname_queues_dict = {}
-        self._processes_dict = {}
+        self._hostname_queues_dict = {}  # type: Dict[Text, JoinableQueue]
+        self._processes_dict = {}  # type: Dict[Text, List[WorkerProcess]]
 
-        self._task_queue = JoinableQueue()  # Processes get tasks from task_queue and
-        self._result_queue = JoinableQueue()  # put the result of each task in result_queue
+        self._task_queue = JoinableQueue()  # type: JoinableQueue  # Processes get tasks from task_queue and
+        self._result_queue = JoinableQueue()  # type: JoinableQueue # put the result of each task in result_queue
         self._queued_tasks_nb = 0
-
 
     def queue_scan_command(self, server_info, scan_command):
         # type: (ServerConnectivityInfo, PluginScanCommand) -> None
@@ -103,14 +104,13 @@ class ConcurrentScanner(object):
             # Normal commands get put in the standard/shared queue
             self._task_queue.put((server_info, scan_command))
 
-
     def _check_and_create_process(self, hostname):
         # type: (Text) -> None
         if hostname not in self._hostname_queues_dict.keys():
             # We haven't this hostname before
             if self._get_current_processes_nb() < self._max_processes_nb:
                 # Create a new process and new queue for this hostname
-                hostname_queue = JoinableQueue()
+                hostname_queue = JoinableQueue()  # type: JoinableQueue
                 self._hostname_queues_dict[hostname] = hostname_queue
 
                 process = WorkerProcess(hostname_queue, self._task_queue, self._result_queue, self._network_retries,
@@ -133,11 +133,9 @@ class ConcurrentScanner(object):
                 process.start()
                 self._processes_dict[hostname].append(process)
 
-
     def _get_current_processes_nb(self):
         # type: () -> int
         return sum([len(process_list) for hostname, process_list in self._processes_dict.items()])
-
 
     def get_results(self):
         # type: () -> Iterable[PluginScanResult]
@@ -176,10 +174,12 @@ class ConcurrentScanner(object):
         for hostname_queue in self._hostname_queues_dict.values():
             hostname_queue.join()
         for process_list in self._processes_dict.values():
-            [process.join() for process in process_list]  # Causes interpreter shutdown errors
-
+            for process in process_list:
+                process.join()
 
     def emergency_shutdown(self):
+        # type: () -> None
         # Terminating a process this way will corrupt the queues but we're shutting down anyway
         for process_list in self._processes_dict.values():
-            [process.terminate() for process in process_list]
+            for process in process_list:
+                process.terminate()

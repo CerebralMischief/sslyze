@@ -5,7 +5,7 @@ from __future__ import absolute_import
 from __future__ import unicode_literals
 
 from multiprocessing import Process
-from multiprocessing import JoinableQueue
+from multiprocessing import JoinableQueue  # type: ignore
 
 from sslyze.synchronous_scanner import SynchronousScanner
 
@@ -21,7 +21,6 @@ class WorkerProcess(Process):
 
         # The object that will actually run the scan commands
         self._synchronous_scanner = SynchronousScanner(network_retries, network_timeout)
-
 
     def run(self):
         # type: () -> None

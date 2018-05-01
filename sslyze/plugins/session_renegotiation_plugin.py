@@ -3,13 +3,14 @@ from __future__ import absolute_import
 from __future__ import unicode_literals
 
 import socket
+from typing import Text, Type, List
 from xml.etree.ElementTree import Element
 
 from nassl._nassl import OpenSSLError
 
 from sslyze.plugins import plugin_base
-from sslyze.plugins.plugin_base import PluginScanResult
-from sslyze.server_connectivity import ServerConnectivityInfo
+from sslyze.plugins.plugin_base import PluginScanResult, PluginScanCommand
+from sslyze.server_connectivity_info import ServerConnectivityInfo
 
 
 class SessionRenegotiationScanCommand(plugin_base.PluginScanCommand):
@@ -18,10 +19,12 @@ class SessionRenegotiationScanCommand(plugin_base.PluginScanCommand):
 
     @classmethod
     def get_cli_argument(cls):
+        # type: () -> Text
         return 'reneg'
 
     @classmethod
     def get_title(cls):
+        # type: () -> Text
         return 'Session Renegotiation'
 
 
@@ -31,19 +34,22 @@ class SessionRenegotiationPlugin(plugin_base.Plugin):
 
     @classmethod
     def get_available_commands(cls):
+        # type: () -> List[Type[PluginScanCommand]]
         return [SessionRenegotiationScanCommand]
 
-
     def process_task(self, server_info, scan_command):
-        # type: (ServerConnectivityInfo, SessionRenegotiationScanCommand) -> SessionRenegotiationScanResult
+        # type: (ServerConnectivityInfo, plugin_base.PluginScanCommand) -> SessionRenegotiationScanResult
+        if not isinstance(scan_command, SessionRenegotiationScanCommand):
+            raise ValueError('Unexpected scan command')
+
         accepts_client_renegotiation = self._test_client_renegotiation(server_info)
         supports_secure_renegotiation = self._test_secure_renegotiation(server_info)
         return SessionRenegotiationScanResult(server_info, scan_command, accepts_client_renegotiation,
                                               supports_secure_renegotiation)
 
-
     @staticmethod
     def _test_secure_renegotiation(server_info):
+        # type: (ServerConnectivityInfo) -> bool
         """Check whether the server supports secure renegotiation.
         """
         ssl_connection = server_info.get_preconfigured_ssl_connection(should_use_legacy_openssl=True)
@@ -58,9 +64,9 @@ class SessionRenegotiationPlugin(plugin_base.Plugin):
 
         return supports_secure_renegotiation
 
-
     @staticmethod
     def _test_client_renegotiation(server_info):
+        # type: (ServerConnectivityInfo) -> bool
         """Check whether the server honors session renegotiation requests.
         """
         ssl_connection = server_info.get_preconfigured_ssl_connection(should_use_legacy_openssl=True)
@@ -96,8 +102,15 @@ class SessionRenegotiationPlugin(plugin_base.Plugin):
                 elif 'tlsv1 unrecognized name' in str(e.args):
                     # Yahoo's very own way of rejecting a renegotiation
                     accepts_client_renegotiation = False
+                elif 'tlsv1 alert internal error' in str(e.args):
+                    # Jetty server: https://github.com/nabla-c0d3/sslyze/issues/290
+                    accepts_client_renegotiation = False
                 else:
                     raise
+
+            except ConnectionError:
+                # Python 3 only
+                accepts_client_renegotiation = False
 
             # Should be last as socket errors are also IOError
             except IOError as e:
@@ -127,8 +140,8 @@ class SessionRenegotiationScanResult(PluginScanResult):
         self.accepts_client_renegotiation = accepts_client_renegotiation
         self.supports_secure_renegotiation = supports_secure_renegotiation
 
-
     def as_text(self):
+        # type: () -> List[Text]
         result_txt = [self._format_title(self.scan_command.get_title())]
 
         # Client-initiated reneg
@@ -145,8 +158,8 @@ class SessionRenegotiationScanResult(PluginScanResult):
 
         return result_txt
 
-
     def as_xml(self):
+        # type: () -> Element
         result_xml = Element(self.scan_command.get_cli_argument(), title=self.scan_command.get_title())
         result_xml.append(Element('sessionRenegotiation',
                                   attrib={'canBeClientInitiated': str(self.accepts_client_renegotiation),

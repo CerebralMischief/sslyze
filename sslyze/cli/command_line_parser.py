@@ -7,12 +7,14 @@ from optparse import OptionParser, OptionGroup
 import socket
 
 from nassl.ssl_client import OpenSslFileTypeEnum
-from typing import Text
+from typing import Text, Optional, Set, Type, List, Any
 from typing import Tuple
-from sslyze.cli import FailedServerScan
-from sslyze.server_connectivity import ServerConnectivityInfo, ServerConnectivityError
+
+from sslyze.plugins.plugin_base import Plugin
+from sslyze.plugins.utils.trust_store.trust_store_repository import TrustStoresRepository
+
+from sslyze.server_connectivity_tester import ServerConnectivityTester
 from sslyze.ssl_settings import TlsWrappedProtocolEnum, ClientAuthenticationCredentials, HttpConnectTunnelingSettings
-from sslyze.utils.ssl_connection import SSLConnection
 
 
 class CommandLineParsingError(ValueError):
@@ -20,7 +22,26 @@ class CommandLineParsingError(ValueError):
     PARSING_ERROR_FORMAT = '  Command line error: {0}\n  Use -h for help.'
 
     def get_error_msg(self):
+        # type: () -> Text
         return self.PARSING_ERROR_FORMAT.format(self)
+
+
+# TODO(AD): Somewhat hacky as this is not actually an error - need to refactor the command line parsing
+class TrustStoresUpdateCompleted(CommandLineParsingError):
+
+    def get_error_msg(self):
+        # type: () -> Text
+        return 'Trust stores successfully updated.'
+
+
+class ServerStringParsingError(ValueError):
+    """Exception raised when SSLyze was unable to parse a hostname:port string supplied via the command line.
+    """
+
+    def __init__(self, supplied_server_string, error_message):
+        # type: (Text, Text) -> None
+        self.server_string = supplied_server_string
+        self.error_message = error_message
 
 
 class CommandLineServerStringParser(object):
@@ -33,8 +54,9 @@ class CommandLineServerStringParser(object):
 
     @classmethod
     def parse_server_string(cls, server_str):
-        # type: (Text) -> Tuple[Text, Text, int]
+        # type: (Text) -> Tuple[Text, Optional[Text], Optional[int]]
         # Extract ip from target
+        ip = None
         if '{' in server_str and '}' in server_str:
             raw_target = server_str.split('{')
             raw_ip = raw_target[1]
@@ -43,8 +65,6 @@ class CommandLineServerStringParser(object):
 
             # Clean the target
             server_str = raw_target[0]
-        else:
-            ip = None
 
         # Look for ipv6 hint in target
         if '[' in server_str:
@@ -61,24 +81,23 @@ class CommandLineServerStringParser(object):
 
     @classmethod
     def _parse_ipv4_server_string(cls, server_str):
-
+        # type: (Text) -> Tuple[Text, Optional[int]]
+        host = server_str
+        port = None
         if ':' in server_str:
             host = (server_str.split(':'))[0]  # hostname or ipv4 address
             try:
                 port = int((server_str.split(':'))[1])
-            except:  # Port is not an int
-                raise ServerConnectivityError(cls.SERVER_STRING_ERROR_BAD_PORT)
-        else:
-            host = server_str
-            port = None
+            except ValueError:  # Port is not an int
+                raise ServerStringParsingError(server_str, cls.SERVER_STRING_ERROR_BAD_PORT)
 
         return host, port
 
     @classmethod
     def _parse_ipv6_server_string(cls, server_str):
-
+        # type: (Text) -> Tuple[Text, Optional[int]]
         if not socket.has_ipv6:
-            raise ServerConnectivityError(cls.SERVER_STRING_ERROR_NO_IPV6)
+            raise ServerStringParsingError(server_str, cls.SERVER_STRING_ERROR_NO_IPV6)
 
         port = None
         target_split = (server_str.split(']'))
@@ -86,8 +105,8 @@ class CommandLineServerStringParser(object):
         if ':' in target_split[1]:  # port was specified
             try:
                 port = int(target_split[1].rsplit(':')[1])
-            except:  # Port is not an int
-                raise ServerConnectivityError(cls.SERVER_STRING_ERROR_BAD_PORT)
+            except ValueError:  # Port is not an int
+                raise ServerStringParsingError(server_str, cls.SERVER_STRING_ERROR_BAD_PORT)
         return ipv6_addr, port
 
 
@@ -131,6 +150,7 @@ class CommandLineParser(object):
                               5432: TlsWrappedProtocolEnum.STARTTLS_POSTGRES}
 
     def __init__(self, available_plugins, sslyze_version):
+        # type: (Set[Type[Plugin]], Text) -> None
         """Generate SSLyze's command line parser.
         """
         self._parser = OptionParser(version=sslyze_version, usage=self.SSLYZE_USAGE)
@@ -145,12 +165,16 @@ class CommandLineParser(object):
         regular_help = 'Regular HTTPS scan; shortcut for --{}'.format(' --'.join(self.REGULAR_CMD))
         self._parser.add_option('--regular', action='store_true', dest=None, help=regular_help)
 
-
     def parse_command_line(self):
+        # type: () -> Tuple[List[ServerConnectivityTester], List[ServerStringParsingError], Any]
         """Parses the command line used to launch SSLyze.
         """
-
         (args_command_list, args_target_list) = self._parser.parse_args()
+
+        if args_command_list.update_trust_stores:
+            # Just update the trust stores and do nothing
+            TrustStoresRepository.update_default()
+            raise TrustStoresUpdateCompleted()
 
         # Handle the --targets_in command line and fill args_target_list
         if args_command_list.targets_in:
@@ -170,14 +194,12 @@ class CommandLineParser(object):
         if not args_target_list:
             raise CommandLineParsingError('No targets to scan.')
 
-
         # Handle the --regular command line parameter as a shortcut
         if self._parser.has_option('--regular'):
             if getattr(args_command_list, 'regular'):
                 setattr(args_command_list, 'regular', False)
                 for cmd in self.REGULAR_CMD:
                     setattr(args_command_list, cmd, True)
-
 
         # Sanity checks on the command line options
         # Prevent --quiet and --xml_out -
@@ -192,7 +214,6 @@ class CommandLineParser(object):
         if args_command_list.json_file and args_command_list.json_file == '-' \
                 and args_command_list.xml_file and args_command_list.xml_file == '-':
                 raise CommandLineParsingError('Cannot use --xml_out - with --json_out -.')
-
 
         # Sanity checks on the client cert options
         client_auth_creds = None
@@ -215,8 +236,7 @@ class CommandLineParser(object):
                                                                     key_type,
                                                                     args_command_list.keypass)
             except ValueError as e:
-                raise CommandLineParsingError('Invalid client authentication settings: {}.'.format(e[0]))
-
+                raise CommandLineParsingError('Invalid client authentication settings: {}.'.format(e.args[0]))
 
         # HTTP CONNECT proxy
         http_tunneling_settings = None
@@ -224,8 +244,7 @@ class CommandLineParser(object):
             try:
                 http_tunneling_settings = HttpConnectTunnelingSettings.from_url(args_command_list.https_tunnel)
             except ValueError as e:
-                raise CommandLineParsingError('Invalid proxy URL for --https_tunnel: {}.'.format(e[0]))
-
+                raise CommandLineParsingError('Invalid proxy URL for --https_tunnel: {}.'.format(e.args[0]))
 
         # STARTTLS
         tls_wrapped_protocol = TlsWrappedProtocolEnum.PLAIN_TLS
@@ -238,13 +257,7 @@ class CommandLineParser(object):
                     # Protocol was given in the command line
                     tls_wrapped_protocol = self.STARTTLS_PROTOCOL_DICT[args_command_list.starttls]
 
-
-        # Number of connection retries
-        if args_command_list.nb_retries < 1:
-            raise CommandLineParsingError('Cannot have a number smaller than 1 for --nb_retries.')
-
-
-        # Create the server connectivity info for each specifed servers
+        # Create the server connectivity tester for each specified servers
         # A limitation when using the command line is that only one client_auth_credentials and http_tunneling_settings
         # can be specified, for all the servers to scan
         good_server_list = []
@@ -252,9 +265,15 @@ class CommandLineParser(object):
         for server_string in args_target_list:
             try:
                 hostname, ip_address, port = CommandLineServerStringParser.parse_server_string(server_string)
+            except ServerStringParsingError as e:
+                # Will happen if the server string is malformed
+                bad_server_list.append(e)
+                continue
+
+            try:
                 # TODO(AD): Unicode hostnames may fail on Python2
-                #hostname = hostname.decode('utf-8')
-                server_info = ServerConnectivityInfo(
+                # hostname = hostname.decode('utf-8')
+                server_info = ServerConnectivityTester(
                     hostname=hostname,
                     port=port,
                     ip_address=ip_address,
@@ -264,16 +283,10 @@ class CommandLineParser(object):
                     client_auth_credentials=client_auth_creds,
                     http_tunneling_settings=http_tunneling_settings
                 )
-                # Keep the original server string to display it in the CLI output if there was a connection error
-                server_info.server_string = server_string
-                
                 good_server_list.append(server_info)
-            except ServerConnectivityError as e:
-                # Will happen for example if the DNS lookup failed or the server string is malformed
-                bad_server_list.append(FailedServerScan(server_string, e))
             except ValueError as e:
                 # Will happen for example if xmpp_to is specified for a non-XMPP connection
-                raise CommandLineParsingError(e[0])
+                raise CommandLineParsingError(e.args[0])
 
         # Command line hacks
         # Handle --starttls=auto now that we parsed the server strings
@@ -292,10 +305,21 @@ class CommandLineParser(object):
 
         return good_server_list, bad_server_list, args_command_list
 
-
     def _add_default_options(self):
+        # type: () -> None
         """Add default command line options to the parser.
         """
+        # Updating the trust stores
+        update_stores_group = OptionGroup(self._parser, 'Trust stores options', '')
+        update_stores_group.add_option(
+            '--update_trust_stores',
+            help='Update the default trust stores used by SSLyze. The latest stores will be downloaded from '
+                 'https://github.com/nabla-c0d3/trust_stores_observatory. This option is meant to be used separately, '
+                 'and will silence any other command line option supplied to SSLyze.',
+            dest='update_trust_stores',
+            action='store_true',
+        )
+        self._parser.add_option_group(update_stores_group)
 
         # Client certificate options
         clientcert_group = OptionGroup(self._parser, 'Client certificate options', '')
@@ -364,25 +388,15 @@ class CommandLineParser(object):
 
         # Connectivity option group
         connect_group = OptionGroup(self._parser, 'Connectivity options', '')
-        # Timeout
+        # Connection speed
         connect_group.add_option(
-            '--timeout',
-            help='Set the timeout value in seconds used for every socket connection made to the target server(s). '
-                 'Default is {}s.'.format(str(SSLConnection.NETWORK_TIMEOUT)),
-            type='int',
-            dest='timeout',
-            default=SSLConnection.NETWORK_TIMEOUT
-        )
-        # Control connection retry attempts
-        connect_group.add_option(
-            '--nb_retries',
-            help='Set the number retry attempts for all network connections initiated throughout the scan. Increase '
-                 'this value if you are getting a lot of timeout/connection errors when scanning a specific server. '
-                 'Decrease this value to increase the speed of the scans; results may however return connection '
-                 'errors. Default is {} connection attempts.'.format(str(SSLConnection.NETWORK_MAX_RETRIES)),
-            type='int',
-            dest='nb_retries',
-            default=SSLConnection.NETWORK_MAX_RETRIES
+            '--slow_connection',
+            help='Greatly reduce the number of concurrent connections initiated by SSLyze. This will make the scans '
+                 'slower but more reliable if the connection between your host and the server is slow, or if the '
+                 'server cannot handle many concurrent connections. Enable this option if you are getting a lot of '
+                 'timeouts or errors.',
+            action='store_true',
+            dest='slow_connection',
         )
         # HTTP CONNECT Proxy
         connect_group.add_option(
@@ -418,8 +432,8 @@ class CommandLineParser(object):
         )
         self._parser.add_option_group(connect_group)
 
-
     def _add_plugin_options(self, available_plugins):
+        # type: (Set[Type[Plugin]]) -> None
         """Recovers the list of command line options implemented by the available plugins and adds them to the command
         line parser.
         """

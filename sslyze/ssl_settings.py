@@ -20,8 +20,8 @@ try:
 except ImportError:
     # Python 2
     # noinspection PyCompatibility
-    from urlparse import urlparse
-    from urllib import quote
+    from urlparse import urlparse  # type: ignore
+    from urllib import quote  # type: ignore
 
 from nassl.ssl_client import SslClient, OpenSslFileTypeEnum
 
@@ -43,6 +43,14 @@ class TlsWrappedProtocolEnum(Enum):
     STARTTLS_IMAP = 9
     STARTTLS_RDP = 10
     STARTTLS_POSTGRES = 11
+
+
+class ClientAuthenticationServerConfigurationEnum(Enum):
+    """Whether the server asked for client authentication.
+    """
+    DISABLED = 1
+    OPTIONAL = 2
+    REQUIRED = 3
 
 
 class ClientAuthenticationCredentials(object):
@@ -77,6 +85,14 @@ class ClientAuthenticationCredentials(object):
         SslClient(client_certchain_file=self.client_certificate_chain_path, client_key_file=self.client_key_path,
                   client_key_type=self.client_key_type, client_key_password=self.client_key_password)
 
+    def __str__(self):
+        # type: () -> Text
+        return '<{class_name}: cert_path="{cert_path}", key_path="{key_path}">'.format(
+            class_name=self.__class__.__name__,
+            cert_path=self.client_certificate_chain_path,
+            key_path=self.client_key_path,
+        )
+
 
 class HttpConnectTunnelingSettings(object):
     """Container for specifying the settings to tunnel all traffic through an HTTP Connect Proxy.
@@ -96,6 +112,14 @@ class HttpConnectTunnelingSettings(object):
         self.basic_auth_user = basic_auth_user
         self.basic_auth_password = basic_auth_password
 
+    def __str__(self):
+        # type: () -> Text
+        return '<{class_name}: proxy_server=({hostname}, {port}), username="{user}">'.format(
+            class_name=self.__class__.__name__,
+            hostname=self.hostname,
+            port=self.port,
+            user=self.basic_auth_user,
+        )
 
     @classmethod
     def from_url(cls, proxy_url):
@@ -114,13 +138,3 @@ class HttpConnectTunnelingSettings(object):
 
         port = parsed_url.port if parsed_url.port else default_port
         return cls(parsed_url.hostname, port, parsed_url.username, parsed_url.password)
-
-
-    def get_basic_auth_header(self):
-        # type: () -> Text
-        """Generate the right HTTP header for Basic Authentication.
-        """
-        header = ''
-        if self.basic_auth_user is not None:
-            header = b64encode('{0}:{1}'.format(quote(self.basic_auth_user), quote(self.basic_auth_password)))
-        return header

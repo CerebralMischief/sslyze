@@ -10,7 +10,7 @@ from cryptography.x509.name import Name
 from cryptography.x509.extensions import ExtensionNotFound
 from cryptography.x509.oid import ObjectIdentifier
 from cryptography.x509.oid import ExtensionOID
-from typing import Dict
+from typing import Dict, Any
 from typing import List
 from typing import Optional
 from typing import Text
@@ -32,30 +32,35 @@ class TrustStore(object):
         self.path = path
         self.name = name
         self.version = version
-        self.__ev_oids_arg = ev_oids
-        self._ev_oids = []
+
+        # Used for pickling
+        self.__ev_oids_as_str = ev_oids
+        self.ev_oids = []  # type: List[ObjectIdentifier]
         self.__parse_ev_oids()
 
-        self._subject_to_certificate_dict = None
+        self._subject_to_certificate_dict = self._compute_subject_certificate_dict(self.path)
 
     def __eq__(self, other):
-        # type: (TrustStore) -> bool
-        if self.path == other.path and self._ev_oids == other._ev_oids:
+        # type: (object) -> bool
+        if isinstance(other, TrustStore) and self.path == other.path and self.ev_oids == other.ev_oids:
             return True
         return False
 
     def __parse_ev_oids(self):
-        if self.__ev_oids_arg:
-            self._ev_oids = [ObjectIdentifier(oid) for oid in self.__ev_oids_arg]
+        # type: () -> None
+        if self.__ev_oids_as_str:
+            self.ev_oids = [ObjectIdentifier(oid) for oid in self.__ev_oids_as_str]
 
     def __getstate__(self):
+        # type: () -> Dict[Text, Any]
         pickable_dict = self.__dict__.copy()
         # Remove non-pickable entries
         pickable_dict['_subject_to_certificate_dict'] = None
-        pickable_dict['_ev_oids'] = []
+        pickable_dict['ev_oids'] = []
         return pickable_dict
 
     def __setstate__(self, state):
+        # type: (Dict[Text, Any]) -> None
         self.__dict__.update(state)
         # Manually restore non-pickable entries
         self.__parse_ev_oids()
@@ -64,7 +69,7 @@ class TrustStore(object):
         # type: (Certificate) -> bool
         """Is the supplied server certificate EV?
         """
-        if not self._ev_oids:
+        if not self.ev_oids:
             raise ValueError('No EV OIDs supplied for {} store - cannot detect EV certificates'.format(self.name))
 
         try:
@@ -73,7 +78,7 @@ class TrustStore(object):
             return False
 
         for policy in cert_policies_ext.value:
-            if policy.policy_identifier in self._ev_oids:
+            if policy.policy_identifier in self.ev_oids:
                 return True
         return False
 
@@ -106,9 +111,7 @@ class TrustStore(object):
         return cert_dict
 
     def _get_certificate_with_subject(self, certificate_subject):
-        # type: (Name) -> Certificate
-        if self._subject_to_certificate_dict is None:
-            self._subject_to_certificate_dict = self._compute_subject_certificate_dict(self.path)
+        # type: (Name) -> Optional[Certificate]
         return self._subject_to_certificate_dict.get(certificate_subject, None)
 
     @staticmethod
@@ -169,4 +172,3 @@ class AnchorCertificateNotInTrustStoreError(CouldNotBuildVerifiedChainError):
 
 class InvalidCertificateChainOrderError(CouldNotBuildVerifiedChainError):
     pass
-
